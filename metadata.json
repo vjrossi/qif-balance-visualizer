@@ -1,0 +1,5 @@
+{
+  "name": "QIF Balance Visualizer",
+  "description": "An application to upload a QIF file from your bank, provide a starting balance, and visualize the balance over time on a line chart.",
+  "requestFramePermissions": []
+}
