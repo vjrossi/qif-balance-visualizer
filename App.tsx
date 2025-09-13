@@ -1,13 +1,12 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { LineChartComponent } from './components/LineChartComponent';
 import { DataPoint, ProjectData, Transaction, AccountData } from './types';
+import { useLoanCalculations } from './hooks/useLoanCalculations';
 
 const App: React.FC = () => {
   const [homeLoan, setHomeLoan] = useState({ fileName: '', startingBalance: '', startingDate: '', transactions: [] as Transaction[], autoDateMessage: null as string | null });
   const [offset, setOffset] = useState({ fileName: '', startingBalance: '', startingDate: '', transactions: [] as Transaction[], autoDateMessage: null as string | null });
   
-  const [baseChartData, setBaseChartData] = useState<DataPoint[] | null>(null);
-  const [displayData, setDisplayData] = useState<DataPoint[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -19,9 +18,6 @@ const App: React.FC = () => {
   const [showHomeLoanTrend, setShowHomeLoanTrend] = useState<boolean>(false);
   const [showOffsetTrend, setShowOffsetTrend] = useState<boolean>(false);
   const [showNetLoanTrend, setShowNetLoanTrend] = useState<boolean>(false);
-  const [triggerChartGeneration, setTriggerChartGeneration] = useState(false);
-
-  const [forecasts, setForecasts] = useState<{ homeLoan?: string; offset?: string; netLoan?: string }>({});
   
   // State for immediate brush position feedback
   const [brushStartIndex, setBrushStartIndex] = useState<number | undefined>(undefined);
@@ -30,111 +26,38 @@ const App: React.FC = () => {
   // State to trigger expensive calculations only when dragging ends
   const [finalBrushStartIndex, setFinalBrushStartIndex] = useState<number | undefined>(undefined);
   const [finalBrushEndIndex, setFinalBrushEndIndex] = useState<number | undefined>(undefined);
-
+  
+  // Use the loan calculations hook
+  const {
+    baseChartData,
+    displayData,
+    forecasts,
+    handleBrushChange: handleBrushChangeFromHook
+  } = useLoanCalculations({
+    homeLoanTransactions: homeLoan.transactions,
+    offsetTransactions: offset.transactions,
+    homeLoanStartBalance: parseFloat(homeLoan.startingBalance) || 0,
+    offsetStartBalance: parseFloat(offset.startingBalance) || 0,
+    homeLoanStartDate: homeLoan.startingDate,
+    offsetStartDate: offset.startingDate
+  });
 
   const qifHomeLoanInputRef = useRef<HTMLInputElement>(null);
   const qifOffsetInputRef = useRef<HTMLInputElement>(null);
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
   
-  useEffect(() => {
-    if (baseChartData === null) return;
-    
-    // This effect is triggered when transactions are merged into an active project.
-    // It will regenerate the chart with the new combined data.
-    generateChart();
+  // Handle brush change events
+  const handleBrushChange = useCallback((range: { startIndex?: number; endIndex?: number }) => {
+    setBrushStartIndex(range.startIndex);
+    setBrushEndIndex(range.endIndex);
+    handleBrushChangeFromHook(range);
+  }, [handleBrushChangeFromHook]);
 
-  }, [homeLoan.transactions, offset.transactions]);
-
-  useEffect(() => {
-      if (triggerChartGeneration) {
-          handleSubmit();
-          setTriggerChartGeneration(false); // Reset the trigger
-      }
-  }, [triggerChartGeneration]);
-
-  useEffect(() => {
-    if (!baseChartData) {
-      setDisplayData(null);
-      setForecasts({});
-      return;
-    }
-
-    const startIndex = finalBrushStartIndex ?? 0;
-    const endIndex = finalBrushEndIndex ?? baseChartData.length - 1;
-
-    const calculationData = baseChartData.slice(startIndex, endIndex + 1);
-    
-    const homeLoanPoints: { x: number; y: number }[] = [];
-    const offsetPoints: { x: number; y: number }[] = [];
-    const netLoanPoints: { x: number; y: number }[] = [];
-    
-    calculationData.forEach((d, i) => {
-      const originalIndex = startIndex + i;
-      if (typeof d.homeLoan === 'number') homeLoanPoints.push({ x: originalIndex, y: d.homeLoan });
-      if (typeof d.offset === 'number') offsetPoints.push({ x: originalIndex, y: d.offset });
-      if (typeof d.netLoan === 'number') netLoanPoints.push({ x: originalIndex, y: d.netLoan });
-    });
-
-    const { trendFn: homeLoanTrendFn, slope: homeLoanSlope, intercept: homeLoanIntercept } = calculateLinearRegression(homeLoanPoints);
-    const { trendFn: offsetTrendFn, slope: offsetSlope, intercept: offsetIntercept } = calculateLinearRegression(offsetPoints);
-    const { trendFn: netLoanTrendFn, slope: netLoanSlope, intercept: netLoanIntercept } = calculateLinearRegression(netLoanPoints);
-    
-    const calculateForecast = (
-      slope: number,
-      intercept: number,
-      points: { x: number; y: number }[],
-      allData: DataPoint[]
-    ): string | undefined => {
-      if (slope >= 0 || points.length < 2 || isNaN(slope)) {
-        return undefined;
-      }
-      
-      const x_zero = -intercept / slope;
-      const lastPoint = points[points.length - 1];
-      const firstPoint = points[0];
-
-      if (x_zero <= lastPoint.x) {
-        return undefined;
-      }
-
-      const firstDate = new Date(allData[firstPoint.x].name);
-      const lastDate = new Date(allData[lastPoint.x].name);
-
-      const timeDiff = lastDate.getTime() - firstDate.getTime();
-      const indexDiff = lastPoint.x - firstPoint.x;
-
-      if (indexDiff === 0) return undefined;
-
-      const avgMsPerIndex = timeDiff / indexDiff;
-      const indexFromLastToZero = x_zero - lastPoint.x;
-      const msFromLastToZero = indexFromLastToZero * avgMsPerIndex;
-
-      if(isNaN(msFromLastToZero)) return undefined;
-
-      const zeroDate = new Date(lastDate.getTime() + msFromLastToZero);
-
-      return zeroDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-    };
-    
-    const newForecasts = {
-        homeLoan: calculateForecast(homeLoanSlope, homeLoanIntercept, homeLoanPoints, baseChartData),
-        offset: calculateForecast(offsetSlope, offsetIntercept, offsetPoints, baseChartData),
-        netLoan: calculateForecast(netLoanSlope, netLoanIntercept, netLoanPoints, baseChartData),
-    };
-    setForecasts(newForecasts);
-
-    const dataWithTrends = baseChartData.map((d, i) => {
-      return {
-          ...d,
-          homeLoanTrend: homeLoanTrendFn(i) ?? undefined,
-          offsetTrend: offsetTrendFn(i) ?? undefined,
-          netLoanTrend: netLoanTrendFn(i) ?? undefined,
-      };
-    });
-    setDisplayData(dataWithTrends);
-
-  }, [baseChartData, finalBrushStartIndex, finalBrushEndIndex]);
-
+  // Handle brush end event
+  const handleBrushUp = useCallback(() => {
+    setFinalBrushStartIndex(brushStartIndex);
+    setFinalBrushEndIndex(brushEndIndex);
+  }, [brushStartIndex, brushEndIndex]);
 
   const parseQif = (content: string): Transaction[] => {
     const transactionsRaw = content.split('^').filter(t => t.trim() !== '');
@@ -291,110 +214,16 @@ const App: React.FC = () => {
     return { slope, intercept, trendFn: (x: number) => slope * x + intercept };
   };
 
+  const generateChart = useCallback(() => {
+    // The chart generation is now handled by the useLoanCalculations hook
+    // This function is kept for backward compatibility
+    setInfo("Chart data updated!");
+  }, []);
 
-  const generateChart = () => {
-      const hasHomeLoanData = homeLoan.transactions.length > 0 && homeLoan.startingBalance && homeLoan.startingDate;
-      const hasOffsetData = offset.transactions.length > 0 && offset.startingBalance && offset.startingDate;
-
-      if (!hasHomeLoanData && !hasOffsetData) {
-        throw new Error('Please provide data for at least one account.');
-      }
-    
-      let homeLoanMap: Map<string, number> | null = null;
-      if (hasHomeLoanData) {
-        const balance = parseFloat(homeLoan.startingBalance);
-        if (isNaN(balance)) throw new Error("Home Loan starting balance must be a valid number.");
-        homeLoanMap = generateBalanceMap(homeLoan.transactions, balance, homeLoan.startingDate);
-      }
-
-      let offsetMap: Map<string, number> | null = null;
-      if (hasOffsetData) {
-        const balance = parseFloat(offset.startingBalance);
-        if (isNaN(balance)) throw new Error("Offset starting balance must be a valid number.");
-        offsetMap = generateBalanceMap(offset.transactions, balance, offset.startingDate);
-      }
-      
-      const allDates = new Set<string>([
-        ...(homeLoanMap ? Array.from(homeLoanMap.keys()) : []),
-        ...(offsetMap ? Array.from(offsetMap.keys()) : [])
-      ]);
-      
-      const sortedDates = Array.from(allDates).sort((a, b) => new Date(a + 'T00:00:00Z').getTime() - new Date(b + 'T00:00:00Z').getTime());
-      
-      const combinedData: DataPoint[] = [];
-      let lastHomeLoanBalance: number | null = null;
-      let lastOffsetBalance: number | null = null;
-      
-      const homeLoanStartDate = hasHomeLoanData ? new Date(homeLoan.startingDate + 'T00:00:00Z') : null;
-      const offsetStartDate = hasOffsetData ? new Date(offset.startingDate + 'T00:00:00Z') : null;
-
-      for (const date of sortedDates) {
-        const currentDate = new Date(date + 'T00:00:00Z');
-        const dp: DataPoint = { name: currentDate.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }) };
-
-        // Home Loan data point (displayed as positive value)
-        if (hasHomeLoanData && homeLoanStartDate) {
-          if (currentDate < homeLoanStartDate) {
-            dp.homeLoanMissing = Math.abs(parseFloat(homeLoan.startingBalance));
-          } else {
-            if (lastHomeLoanBalance === null) {
-              lastHomeLoanBalance = parseFloat(homeLoan.startingBalance);
-            }
-            if (homeLoanMap?.has(date)) {
-              lastHomeLoanBalance = homeLoanMap.get(date)!;
-            }
-            dp.homeLoan = Math.abs(parseFloat(lastHomeLoanBalance.toFixed(2)));
-          }
-        }
-
-        // Offset data point
-        if (hasOffsetData && offsetStartDate) {
-          if (currentDate < offsetStartDate) {
-            dp.offsetMissing = parseFloat(offset.startingBalance);
-          } else {
-            if (lastOffsetBalance === null) {
-              lastOffsetBalance = parseFloat(offset.startingBalance);
-            }
-            if (offsetMap?.has(date)) {
-              lastOffsetBalance = offsetMap.get(date)!;
-            }
-            dp.offset = parseFloat(lastOffsetBalance.toFixed(2));
-          }
-        }
-        
-        // Calculate Net Loan
-        const homeLoanValue = dp.homeLoan ?? dp.homeLoanMissing;
-        const offsetValue = dp.offset ?? dp.offsetMissing;
-        if (typeof homeLoanValue === 'number' && typeof offsetValue === 'number') {
-            dp.netLoan = homeLoanValue - offsetValue;
-        }
-
-        combinedData.push(dp);
-      }
-      
-      setBaseChartData(combinedData);
-      setBrushStartIndex(undefined);
-      setBrushEndIndex(undefined);
-      setFinalBrushStartIndex(undefined);
-      setFinalBrushEndIndex(undefined);
-  }
-
-  const handleSubmit = (e?: React.FormEvent) => {
-    e?.preventDefault();
-    setIsLoading(true);
-    setError(null);
-    setInfo(null);
-    
-    setTimeout(() => {
-      try {
-        generateChart();
-      } catch (err: any) {
-        setError(err.message || 'An error occurred during processing.');
-      } finally {
-        setIsLoading(false);
-      }
-    }, 500);
-  };
+  const handleSubmit = useCallback((e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    generateChart();
+  }, [generateChart]);
 
   const handleExport = () => {
     if (!isProjectActive) {
@@ -429,7 +258,7 @@ const App: React.FC = () => {
       reader.onload = (event) => {
         try {
           const importedProject = JSON.parse(event.target?.result as string) as ProjectData;
-          handleReset(); // Clear old state
+          resetState(); // Clear old state
           
           let hasData = false;
           if (importedProject.homeLoan) {
@@ -446,7 +275,7 @@ const App: React.FC = () => {
           if (hasData) {
             setProjectFileName(file.name);
             setError(null);
-            setTriggerChartGeneration(true);
+            setInfo("Project loaded!");
           } else {
             throw new Error("Invalid or empty project file.");
           }
@@ -463,17 +292,13 @@ const App: React.FC = () => {
     e.target.value = '';
   };
   
-  const handleReset = () => {
+  const resetState = () => {
     setHomeLoan({ fileName: '', startingBalance: '', startingDate: '', transactions: [], autoDateMessage: null });
     setOffset({ fileName: '', startingBalance: '', startingDate: '', transactions: [], autoDateMessage: null });
-    setBaseChartData(null);
-    setDisplayData(null);
     setError(null);
     setInfo(null);
     setIsLoading(false);
     setProjectFileName(null);
-    setTriggerChartGeneration(false);
-    setForecasts({});
     setBrushStartIndex(undefined);
     setBrushEndIndex(undefined);
     setFinalBrushStartIndex(undefined);
@@ -483,19 +308,6 @@ const App: React.FC = () => {
     if (jsonFileInputRef.current) jsonFileInputRef.current.value = '';
   };
 
-  const handleBrushChange = (range: { startIndex?: number; endIndex?: number }) => {
-    // Prevent infinite render loop by checking if the values have actually changed.
-    if (brushStartIndex !== range.startIndex || brushEndIndex !== range.endIndex) {
-      setBrushStartIndex(range.startIndex);
-      setBrushEndIndex(range.endIndex);
-    }
-  };
-
-  const handleBrushUp = () => {
-    setFinalBrushStartIndex(brushStartIndex);
-    setFinalBrushEndIndex(brushEndIndex);
-  };
-  
   const getUploadFromDate = (transactions: Transaction[]): string | null => {
     if (transactions.length === 0) return null;
     const latestTransaction = transactions[transactions.length - 1];
@@ -597,7 +409,7 @@ const App: React.FC = () => {
                   Import Project
                   <input ref={jsonFileInputRef} type="file" accept=".json" onChange={handleImport} className="hidden" />
                 </label>
-                <button type="button" onClick={handleReset} className="w-full font-semibold py-2 px-4 rounded-lg bg-red-800 hover:bg-red-700 transition-colors duration-200">
+                <button type="button" onClick={resetState} className="w-full font-semibold py-2 px-4 rounded-lg bg-red-800 hover:bg-red-700 transition-colors duration-200">
                   Reset
                 </button>
             </div>
